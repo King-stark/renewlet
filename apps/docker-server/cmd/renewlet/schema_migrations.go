@@ -17,6 +17,7 @@ const (
 	settingsLocalePreferenceRecoveryPoint = "renewlet_pre_settings_locale_preference_v1.zip"
 
 	settingsLocalePreferenceGuardV2MigrationName = "settings_locale_preference_guard_v2"
+	settingsLocalePreferenceGuardV2RecoveryPoint = "renewlet_pre_settings_locale_preference_guard_v2.zip"
 )
 
 type schemaDataMigration struct {

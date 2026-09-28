@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/pocketbase/dbx"
+	"github.com/pocketbase/pocketbase/core"
 )
 
 func TestSettingsLocalePreferenceGuardAllowListMatchesSupportedLocales(t *testing.T) {
@@ -20,22 +21,7 @@ func TestSettingsLocalePreferenceGuardAllowListMatchesSupportedLocales(t *testin
 
 func TestSettingsLocalePreferenceGuardV2UpgradesLegacyTrigger(t *testing.T) {
 	app := newSchemaTestApp(t)
-	if err := ensureSchema(app); err != nil {
-		t.Fatal(err)
-	}
-	for name, statement := range settingsLocalePreferenceGuardV1SQL {
-		if _, err := app.DB().NewQuery("DROP TRIGGER IF EXISTS " + name).Execute(); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := app.DB().NewQuery(statement).Execute(); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := app.DB().NewQuery("DELETE FROM " + schemaDataMigrationsTable + " WHERE name = {:name}").
-		Bind(dbx.Params{"name": settingsLocalePreferenceGuardV2MigrationName}).
-		Execute(); err != nil {
-		t.Fatal(err)
-	}
+	seedSettingsLocalePreferenceGuardV1(t, app)
 
 	insert := func(id string, settings string) error {
 		user := createSchemaTestUser(t, app, "locale-guard-v2-"+strings.ReplaceAll(id, "_", "-")+"@example.com")
@@ -85,5 +71,68 @@ func TestSettingsLocalePreferenceGuardV2UpgradesLegacyTrigger(t *testing.T) {
 	}
 	if err := runSchemaDataMigrations(app); err == nil || !strings.Contains(err.Error(), "guard drift") {
 		t.Fatal(fmt.Errorf("guard v2 drift validation error = %v", err))
+	}
+}
+
+func seedSettingsLocalePreferenceGuardV1(t *testing.T, app core.App) {
+	t.Helper()
+	if err := ensureSchema(app); err != nil {
+		t.Fatal(err)
+	}
+	for name, statement := range settingsLocalePreferenceGuardV1SQL {
+		if _, err := app.DB().NewQuery("DROP TRIGGER IF EXISTS " + name).Execute(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := app.DB().NewQuery(statement).Execute(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := app.DB().NewQuery("DELETE FROM " + schemaDataMigrationsTable + " WHERE name = {:name}").
+		Bind(dbx.Params{"name": settingsLocalePreferenceGuardV2MigrationName}).
+		Execute(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSettingsLocalePreferenceGuardV2MarkerFailureRollsBackAndRetries(t *testing.T) {
+	app := newSchemaTestApp(t)
+	seedSettingsLocalePreferenceGuardV1(t, app)
+	// 在替换 trigger 后阻断完成标记，确保不会留下“新 guard、旧账本”的半升级状态。
+	if _, err := app.DB().NewQuery(`CREATE TRIGGER fail_locale_guard_marker BEFORE INSERT ON ` + schemaDataMigrationsTable + `
+		WHEN NEW.name = 'settings_locale_preference_guard_v2'
+		BEGIN SELECT RAISE(ABORT, 'injected locale marker failure'); END`).Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if err := runSchemaDataMigrations(app); err == nil || !strings.Contains(err.Error(), "injected locale marker failure") {
+		t.Fatalf("marker failure = %v", err)
+	}
+	if err := verifySettingsLocalePreferenceGuardDefinitions(app, settingsLocalePreferenceGuardV1SQL); err != nil {
+		t.Fatalf("failed transaction did not restore both v1 guards: %v", err)
+	}
+	if applied, err := schemaDataMigrationApplied(app, settingsLocalePreferenceGuardV2MigrationName); err != nil || applied {
+		t.Fatalf("failed transaction published marker: applied=%v err=%v", applied, err)
+	}
+	if _, err := app.DB().NewQuery("DROP TRIGGER fail_locale_guard_marker").Execute(); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := runSchemaDataMigrations(app); err != nil {
+			t.Fatalf("retry/restart failed: %v", err)
+		}
+		if err := verifySettingsLocalePreferenceGuard(app); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// v2 账本一旦提交，退回完整 v1 定义也属于漂移，不能因 v1 的过渡复核被接受。
+	for name, statement := range settingsLocalePreferenceGuardV1SQL {
+		if _, err := app.DB().NewQuery("DROP TRIGGER " + name).Execute(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := app.DB().NewQuery(statement).Execute(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := runSchemaDataMigrations(app); err == nil || !strings.Contains(err.Error(), settingsLocalePreferenceGuardV2MigrationName+" guard drift") {
+		t.Fatalf("completed v2 accepted old guards: %v", err)
 	}
 }

@@ -232,7 +232,8 @@ func installSettingsLocalePreferenceGuard(app core.App) error {
 	return nil
 }
 
-// v1 账本记录可能早于 guard_v2：已升级实例保留 v1 trigger 直到 guard_v2 运行，所以 v1 复核接受两代定义。
+// 这里只复核历史 v1 账本：旧库尚为 v1，重启的新库已为 v2；随后 guard_v2 必须收敛并严格复核当前定义。
+// 不能在此只认 v2 而阻断旧库升级，也不能把两代定义的过渡复核用于最终运行时校验。
 func verifySettingsLocalePreferenceGuardV1(app core.App) error {
 	return verifySettingsLocalePreferenceGuardDefinitions(app, settingsLocalePreferenceGuardV1SQL, settingsLocalePreferenceGuardSQL)
 }
@@ -266,7 +267,7 @@ func verifySettingsLocalePreferenceGuardDefinitions(app core.App, accepted ...ma
 	return nil
 }
 
-// guard_v2 只替换 trigger 白名单，不改写 settings 数据；预检和复核仍确保所有既有偏好合法。
+// guard_v2 只替换白名单，不改写 settings；DROP、CREATE 与完成标记由调用方放在同一事务，失败必须恢复旧 guard。
 func replaceSettingsLocalePreferenceGuard(app core.App) error {
 	for _, name := range []string{settingsLocalePreferenceInsertGuardName, settingsLocalePreferenceUpdateGuardName} {
 		if _, err := app.DB().NewQuery(`DROP TRIGGER IF EXISTS ` + name).Execute(); err != nil {
